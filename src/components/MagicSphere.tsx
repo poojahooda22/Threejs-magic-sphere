@@ -359,7 +359,7 @@ function createMagicSphere(container: HTMLDivElement): () => void {
   mainGroup.add(plasmaMesh);
 
   // Particles — orbital attributes (positions computed in vertex shader)
-  const pCount = 2000;
+  const pCount = 1500;
   const sphereRadius = 0.95;
   const pPos = new Float32Array(pCount * 3);     // dummy, required by Three.js
   const pSizes = new Float32Array(pCount);
