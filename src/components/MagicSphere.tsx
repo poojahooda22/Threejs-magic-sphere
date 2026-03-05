@@ -147,30 +147,81 @@ const plasmaFragmentShader = /* glsl */ `
   }
 `;
 
-// --- PARTICLE SHADERS ---
+// --- PARTICLE SHADERS (HEAT-MAP + GALAXY MOTION) ---
 const particleVertexShader = /* glsl */ `
   uniform float uTime;
+  uniform float uGalaxySpeed;
+  uniform float uDriftAmp;
+
   attribute float aSize;
+  attribute float aRadius;
+  attribute float aTheta;
+  attribute float aPhi;
+  attribute float aSpeed;
+
   varying float vAlpha;
+  varying float vHeat;
 
   void main() {
-    vec3 pos = position;
-    pos.y += sin(uTime * 0.2 + pos.x) * 0.02;
-    pos.x += cos(uTime * 0.15 + pos.z) * 0.02;
+    // Differential rotation: inner particles orbit faster
+    float orbitalSpeed = uGalaxySpeed * aSpeed / (0.3 + aRadius);
+    float theta = aTheta + uTime * orbitalSpeed;
+
+    // Use original phi for full sphere distribution
+    float phi = aPhi;
+
+    // Compute orbital position in spherical coords
+    vec3 pos;
+    pos.x = aRadius * sin(phi) * cos(theta);
+    pos.y = aRadius * cos(phi);
+    pos.z = aRadius * sin(phi) * sin(theta);
+
+    // Noise-based turbulence drift
+    pos.y += sin(uTime * 0.3 + aTheta * 3.0) * uDriftAmp;
+    pos.x += cos(uTime * 0.25 + aPhi * 2.0) * uDriftAmp;
+    pos.z += sin(uTime * 0.2 + aSpeed * 5.0) * uDriftAmp * 0.5;
+
+    // Clamp inside sphere
+    float r = length(pos);
+    if (r > 0.95) pos *= 0.95 / r;
+
+    // Heat = inverted radial distance (center hottest) + flicker
+    float radial = length(pos) / 0.95;
+    vHeat = (1.0 - radial) + 0.15 * sin(uTime * 0.5 + aSize * 20.0);
+    vHeat = clamp(vHeat, 0.0, 1.0);
 
     vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
     gl_Position = projectionMatrix * mvPosition;
 
-    float baseSize = 8.0 * aSize + 4.0;
+    float baseSize = 10.0 * aSize * aSize + 4.0;
     gl_PointSize = baseSize * (1.0 / -mvPosition.z);
 
+    // Twinkle
     vAlpha = 0.8 + 0.2 * sin(uTime + aSize * 10.0);
   }
 `;
 
 const particleFragmentShader = /* glsl */ `
-  uniform vec3 uColor;
   varying float vAlpha;
+  varying float vHeat;
+
+  // Heat-map: white -> cyan -> green -> yellow -> red -> white
+  vec3 heatmap(float t) {
+    vec3 c;
+    if (t < 0.2) {
+      c = mix(vec3(0.8, 0.8, 0.9), vec3(1.0, 1.0, 1.0), t / 0.2);
+    } else if (t < 0.4) {
+      c = mix(vec3(1.0, 1.0, 1.0), vec3(0.0, 1.0, 0.6), (t - 0.2) / 0.2);
+    } else if (t < 0.6) {
+      c = mix(vec3(0.0, 1.0, 0.6), vec3(1.0, 1.0, 0.0), (t - 0.4) / 0.2);
+    } else if (t < 0.8) {
+      c = mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 0.2, 0.0), (t - 0.6) / 0.2);
+    } else {
+      c = mix(vec3(1.0, 0.2, 0.0), vec3(1.0, 1.0, 1.0), (t - 0.8) / 0.2);
+    }
+    return c;
+  }
+
   void main() {
     vec2 uv = gl_PointCoord - vec2(0.5);
     float dist = length(uv);
@@ -179,7 +230,8 @@ const particleFragmentShader = /* glsl */ `
     float glow = 1.0 - (dist * 2.0);
     glow = pow(glow, 1.8);
 
-    gl_FragColor = vec4(uColor, glow * vAlpha);
+    vec3 color = heatmap(vHeat);
+    gl_FragColor = vec4(color, glow * vAlpha);
   }
 `;
 
@@ -196,6 +248,8 @@ interface SphereParams {
   colorBright: number;
   shellColor: number;
   shellOpacity: number;
+  galaxySpeed: number;
+  driftAmplitude: number;
 }
 
 function createMagicSphere(container: HTMLDivElement): () => void {
@@ -211,6 +265,8 @@ function createMagicSphere(container: HTMLDivElement): () => void {
     colorBright: 0x000000,
     shellColor: 0x0066ff,
     shellOpacity: 0.41,
+    galaxySpeed: 0.3,
+    driftAmplitude: 0.03,
   };
 
   // Scene
@@ -302,32 +358,41 @@ function createMagicSphere(container: HTMLDivElement): () => void {
   const plasmaMesh = new THREE.Mesh(plasmaGeo, plasmaMat);
   mainGroup.add(plasmaMesh);
 
-  // Particles
-  const pCount = 600;
-  const pPos = new Float32Array(pCount * 3);
-  const pSizes = new Float32Array(pCount);
+  // Particles — orbital attributes (positions computed in vertex shader)
+  const pCount = 2000;
   const sphereRadius = 0.95;
+  const pPos = new Float32Array(pCount * 3);     // dummy, required by Three.js
+  const pSizes = new Float32Array(pCount);
+  const pRadius = new Float32Array(pCount);
+  const pTheta = new Float32Array(pCount);
+  const pPhi = new Float32Array(pCount);
+  const pSpeed = new Float32Array(pCount);
 
   for (let i = 0; i < pCount; i++) {
-    const r = sphereRadius * Math.cbrt(Math.random());
-    const theta = Math.random() * Math.PI * 2;
-    const phi = Math.acos(2 * Math.random() - 1);
+    pPos[i * 3] = 0;
+    pPos[i * 3 + 1] = 0;
+    pPos[i * 3 + 2] = 0;
 
-    pPos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
-    pPos[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-    pPos[i * 3 + 2] = r * Math.cos(phi);
-
+    pRadius[i] = sphereRadius * Math.cbrt(Math.random());
+    pTheta[i] = Math.random() * Math.PI * 2;
+    pPhi[i] = Math.acos(2 * Math.random() - 1);
+    pSpeed[i] = 0.5 + Math.random();             // 0.5..1.5
     pSizes[i] = Math.random();
   }
 
   const pGeo = new THREE.BufferGeometry();
   pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
   pGeo.setAttribute('aSize', new THREE.BufferAttribute(pSizes, 1));
+  pGeo.setAttribute('aRadius', new THREE.BufferAttribute(pRadius, 1));
+  pGeo.setAttribute('aTheta', new THREE.BufferAttribute(pTheta, 1));
+  pGeo.setAttribute('aPhi', new THREE.BufferAttribute(pPhi, 1));
+  pGeo.setAttribute('aSpeed', new THREE.BufferAttribute(pSpeed, 1));
 
   const pMat = new THREE.ShaderMaterial({
     uniforms: {
       uTime: { value: 0 },
-      uColor: { value: new THREE.Color(0xffffff) },
+      uGalaxySpeed: { value: 0.3 },
+      uDriftAmp: { value: 0.03 },
     },
     vertexShader: particleVertexShader,
     fragmentShader: particleFragmentShader,
@@ -378,6 +443,16 @@ function createMagicSphere(container: HTMLDivElement): () => void {
     .add(params, 'shellOpacity', 0.0, 1.0)
     .name('Edge Opacity')
     .onChange((v: number) => { shellFrontMat.uniforms.uOpacity.value = v; });
+
+  const folderGalaxy = gui.addFolder('Galaxy');
+  folderGalaxy
+    .add(params, 'galaxySpeed', 0.0, 1.0)
+    .name('Orbit Speed')
+    .onChange((v: number) => { pMat.uniforms.uGalaxySpeed.value = v; });
+  folderGalaxy
+    .add(params, 'driftAmplitude', 0.0, 0.1)
+    .name('Drift')
+    .onChange((v: number) => { pMat.uniforms.uDriftAmp.value = v; });
 
   const folderRot = gui.addFolder('Rotation');
   folderRot.add(params, 'rotationSpeedX', -0.01, 0.01).name('Speed X');
